@@ -1,0 +1,277 @@
+{
+  "name": "みどり タグ設置フロー",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "chatwork-webhook",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node_webhook",
+      "name": "Chatwork Webhook受信",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "ok",
+        "options": {}
+      },
+      "id": "node_respond",
+      "name": "即時200 OK返却",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [460, 180]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Chatwork Webhookペイロードをパース\nconst body = $input.first().json.body;\nlet payload;\ntry {\n  payload = typeof body === 'string' ? JSON.parse(body) : body;\n} catch(e) {\n  return [{ json: { skip: true, reason: 'parse error' } }];\n}\n\nconst event = payload?.webhook_event || {};\nconst roomId   = String(event.room_id || '');\nconst senderId = String(event.from_account_id || '');\nconst rawBody  = String(event.body || '');\n\n// Toタグ・引用タグを除去してクリーンなテキストを取得\nconst cleanBody = rawBody\n  .replace(/\\[To:\\d+\\][^\\n]*/g, '')\n  .replace(/\\[reply[^\\]]*\\].*?\\[\\/reply\\]/gs, '')\n  .replace(/\\[info\\].*?\\[\\/info\\]/gs, '')\n  .trim();\n\nreturn [{ json: { roomId, senderId, rawBody, cleanBody, payload } }];"
+      },
+      "id": "node_parse",
+      "name": "ペイロードパース＆テキスト整形",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 340]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond_self",
+              "leftValue": "={{ $json.senderId }}",
+              "rightValue": "11156703",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            },
+            {
+              "id": "cond_empty",
+              "leftValue": "={{ $json.cleanBody }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "node_filter_self",
+      "name": "みどり自身の発言を除外",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [680, 340]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $json.cleanBody || '';\nconst MIDORI_ID = '11156703';\n\n// トリガーワード判定\nconst triggerWords = ['タグ設置', 'タグをお願い', 'タグお願い', 'タグ入れて', '計測タグ', 'tag設置', 'TAG設置'];\nconst isTrigger = triggerWords.some(w => body.includes(w));\n\n// 承認・キャンセル判定\nconst isApprove = body.includes('承認') || body.toLowerCase().includes('ok');\nconst isCancel  = body.includes('キャンセル') || body.includes('やめ');\n\n// actionを決定\nlet action;\nif (isTrigger) {\n  action = 'start';\n} else if (isApprove) {\n  action = 'approve';\n} else if (isCancel) {\n  action = 'cancel';\n} else {\n  action = 'input';\n}\n\nreturn [{ json: { ...$json, action } }];"
+      },
+      "id": "node_route",
+      "name": "アクション判定（start/input/approve/cancel）",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 340]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.GAS_WEBAPP_URL }}",
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "values": [
+            {
+              "name": "action",
+              "value": "={{ $json.action }}"
+            },
+            {
+              "name": "roomId",
+              "value": "={{ $json.roomId }}"
+            },
+            {
+              "name": "body",
+              "value": "={{ $json.cleanBody }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node_call_gas",
+      "name": "GAS handleTagSetup 呼び出し",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1120, 340]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {},
+          "conditions": [
+            {
+              "id": "cond_ok",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "ok",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      },
+      "id": "node_check_result",
+      "name": "GAS結果確認（no_sessionはスキップ）",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [1340, 340]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.chatwork.com/v2/rooms/{{ $('GAS handleTagSetup 呼び出し').item.json.roomId || $('アクション判定（start/input/approve/cancel）').item.json.roomId }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-ChatWorkToken",
+              "value": "={{ $vars.CHATWORK_API_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "body": {
+          "values": [
+            {
+              "name": "body",
+              "value": "={{ $json.reply }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node_cw_reply",
+      "name": "Chatworkに返信送信（オペレータルーム）",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1560, 240]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {},
+          "conditions": [
+            {
+              "id": "cond_client_msg",
+              "leftValue": "={{ $('GAS handleTagSetup 呼び出し').item.json.clientMessage }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ]
+        }
+      },
+      "id": "node_check_client",
+      "name": "クライアント向けメッセージあり？",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [1560, 420]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.chatwork.com/v2/rooms/{{ $('GAS handleTagSetup 呼び出し').item.json.targetRoomId }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-ChatWorkToken",
+              "value": "={{ $vars.CHATWORK_API_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "body": {
+          "values": [
+            {
+              "name": "body",
+              "value": "={{ $('GAS handleTagSetup 呼び出し').item.json.clientMessage }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node_cw_client",
+      "name": "Chatworkに送信（クライアントルーム）",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1780, 420]
+    }
+  ],
+  "connections": {
+    "Chatwork Webhook受信": {
+      "main": [
+        [
+          { "node": "即時200 OK返却", "type": "main", "index": 0 },
+          { "node": "ペイロードパース＆テキスト整形", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "ペイロードパース＆テキスト整形": {
+      "main": [
+        [{ "node": "みどり自身の発言を除外", "type": "main", "index": 0 }]
+      ]
+    },
+    "みどり自身の発言を除外": {
+      "main": [
+        [{ "node": "アクション判定（start/input/approve/cancel）", "type": "main", "index": 0 }]
+      ]
+    },
+    "アクション判定（start/input/approve/cancel）": {
+      "main": [
+        [{ "node": "GAS handleTagSetup 呼び出し", "type": "main", "index": 0 }]
+      ]
+    },
+    "GAS handleTagSetup 呼び出し": {
+      "main": [
+        [{ "node": "GAS結果確認（no_sessionはスキップ）", "type": "main", "index": 0 }]
+      ]
+    },
+    "GAS結果確認（no_sessionはスキップ）": {
+      "main": [
+        [
+          { "node": "Chatworkに返信送信（オペレータルーム）", "type": "main", "index": 0 },
+          { "node": "クライアント向けメッセージあり？", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "クライアント向けメッセージあり？": {
+      "main": [
+        [{ "node": "Chatworkに送信（クライアントルーム）", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2026-04-06T00:00:00.000Z",
+  "versionId": "midori-tag-v1"
+}
